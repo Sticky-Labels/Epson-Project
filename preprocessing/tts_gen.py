@@ -236,6 +236,7 @@ Instructions:
 - Extract all order_items with their quantities, modifiers, and seat numbers
 - Include seat_number for each item if specified
 - Set total_amount and restaurant_name to null if not clearly stated
+- - Only extract data for the FIRST check number you find, ignore all subsequent receipts in the text
 - Set confidence_score to 0.8
 
 Return only the JSON structure with all extracted information:"""
@@ -260,7 +261,7 @@ Return only the JSON structure with all extracted information:"""
                 print(f"🤖 Generating ground truth with Groq (attempt {attempt + 1}/{max_retries})...")
                 
                 # Generate with Groq API
-                response_text = self._generate_text(prompt, max_new_tokens=800)
+                response_text = self._generate_text(prompt, max_new_tokens=2000)
                 
                 # Clean the response
                 response_text = response_text.strip()
@@ -430,7 +431,7 @@ def main():
     """
     # Initialize processor with Groq API
     processor = GroqReceiptProcessor(
-        model_name="llama3-70b-8192",
+        model_name="llama-3.3-70b-versatile",
     )
     
     # Process your receipt file and create training splits

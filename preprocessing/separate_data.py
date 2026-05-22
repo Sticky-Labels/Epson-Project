@@ -87,7 +87,7 @@ def main():
     output_file = 'tcp_data_mod2.txt'
     
     # Run the extraction
-    extract_text_sections(input_file, output_file)
+    extract_text_sections(input_file, output_file, search_string="eck#:", prev_chars=200, next_chars=1000)
 
 if __name__ == '__main__':
     main()

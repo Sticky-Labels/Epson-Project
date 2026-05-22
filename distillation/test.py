@@ -13,43 +13,23 @@ def fix_malformed_json(pred_str: str) -> Dict:
     # Add missing opening brace
     if not pred_str.startswith('{'):
         pred_str = '{' + pred_str
-    
-    # Fix order_items array - the main issue in your outputs
-    # Pattern: "order_items":["item_name":"..." should be "order_items":[{"item_name":"..."}]
-    if '"order_items":[' in pred_str and '"order_items":[{' not in pred_str:
-        # Find the order_items section
-        start = pred_str.find('"order_items":[')
-        if start != -1:
-            end = pred_str.find(']', start)
-            if end != -1:
-                items_section = pred_str[start:end+1]
-                # Split by "item_name" to find individual items
-                items = items_section.split('"item_name"')
-                fixed_items = []
-                for i, item in enumerate(items[1:], 1):  # Skip first split which is before first item
-                    item_str = '"item_name"' + item
-                    # Remove trailing comma or bracket if present
-                    item_str = item_str.rstrip(',]')
-                    # Wrap in braces
-                    if not item_str.startswith('{'):
-                        item_str = '{' + item_str
-                    if not item_str.endswith('}'):
-                        item_str = item_str + '}'
-                    fixed_items.append(item_str)
-                
-                # Reconstruct the JSON
-                fixed_items_str = '"order_items":[' + ','.join(fixed_items) + ']'
-                pred_str = pred_str[:start] + fixed_items_str + pred_str[end+1:]
-    
+
     # Add missing closing brace
     if not pred_str.endswith('}'):
         pred_str = pred_str + '}'
-    
-    # Try to parse
+
+    # Fix order_items: wrap each item in {}
+    def fix_order_items(match):
+        inner = match.group(1)
+        parts = re.split(r',(?="item_name")', inner)
+        fixed = ['{' + p.strip() + '}' for p in parts if p.strip()]
+        return '"order_items":[' + ','.join(fixed) + ']'
+
+    pred_str = re.sub(r'"order_items":\[(.+)\](?=\})', fix_order_items, pred_str, flags=re.DOTALL)
+
     try:
         return json.loads(pred_str)
     except:
-        # Return valid empty structure if all else fails
         return {
             "customer_name": None,
             "date": None,
@@ -96,28 +76,66 @@ def fix_item_names(item_name: str) -> str:
     """Fix common OCR errors in item names"""
     if not item_name:
         return None
-    
-    # Key replacements based on your test output
+
+    # Strip extra whitespace and join split words
+    item_name = ' '.join(item_name.split())
+
+    # Filter out garbage — items that are too short or are clearly not food
+    garbage = [
+        'UUS10U DigiCert Inc', 'U DigiCert TLS RSA SHA256 2020',
+        'Pin', 'Ra', 'Hom', 'Grav', 'Chi', 'Buf', 'Coron', 'Melt',
+        'Hot', 'Mild', 'Draft', 'Fried', 'Italian', 'Grilled',
+        'NO MUSTARD', 'Mustard', 'Cheese', 'ToGo', 'Small', 'Large',
+        'Skinny Fry', 'Home Fry', 'Cole Slaw', 'Ranch', 'Blue',
+        'Peppercorn', 'Chix', 'Philly', 'No Pink', 'Cajun',
+    ]
+    if item_name in garbage:
+        return None
+
+    # Fix known OCR errors and abbreviations
     replacements = {
         'IC LITE': 'Iron City Light',
+        'IC LI TE': 'Iron City Light',
         'Italian City Light': 'Iron City Light',
         'Chix Platter': 'Chicken Platter',
+        'Chix Parm Sand': 'Chicken Parm Sandwich',
         'Buffalo Chix Sa': 'Buffalo Chicken Sandwich',
         'Dino Burger San': 'Dino Burger Sandwich',
+        'Dino Burger Sa': 'Dino Burger Sandwich',
+        'Dino B urger San': 'Dino Burger Sandwich',
         'CHX': 'Chicken',
         'DOWNGRD C': 'Downgrade',
-        'UUS10U DigiCert Inc': None,  # Remove this garbage
+        'MICH ULTRA': 'Michelob Ultra',
+        'MICH ULTR': 'Michelob Ultra',
+        'Miche Ultra': 'Michelob Ultra',
+        'BUSCH LIGHT': 'Busch Light',
+        'BLAKE S CIDER': "Blake's Cider",
+        'REDDS APPLE': "Redd's Apple Ale",
+        'Chick en Platter': 'Chicken Platter',
+        'Diet Mo untain D': 'Diet Mountain Dew',
+        'Diet Mo': 'Diet Mountain Dew',
+        'Charb roiled Sa': 'Charbroiled Sandwich',
+        'Ital Stal Sandw': 'Italian Stallion Sandwich',
+        'Philly Stk Sand': 'Philly Steak Sandwich',
+        '1/2 Rack &10 Wi': '1/2 Rack & 10 Wings',
+        'Spinach Chix S': 'Spinach Chicken Salad',
+        'Wing & Fries': 'Wings & Fries',
+        'Spec Fry Buffalo Chix': 'Spicy Fried Buffalo Chicken',
+        'Panni': 'Pannini',
+        'Chix Philly Sa': 'Chicken Philly Sandwich',
+        '1/2BuffChixSand': '1/2 Buffalo Chicken Sandwich',
+        'Pot S kins': 'Potato Skins',
+        'Pino Grigio': 'Pinot Grigio',
     }
-    
+
     for old, new in replacements.items():
         if item_name == old:
             return new
-    
-    # Extract quantity from name (e.g., "Wings 10" -> "Wings")
-    match = re.match(r'^(.+?)\s+(\d+)$', item_name)
-    if match:
-        return match.group(1)
-    
+
+    # Remove items that are just a single word under 3 characters
+    if len(item_name) < 3:
+        return None
+
     return item_name
 
 def extract_quantity(item_name: str, current_qty: int = 1) -> tuple:
@@ -131,14 +149,42 @@ def clean_modifiers(modifiers: List) -> List:
     """Clean up modifier list"""
     if not isinstance(modifiers, list):
         return []
-    
+
+    # Fix known modifier abbreviations
+    modifier_fixes = {
+        'CHX': 'Chicken',
+        'Chix': 'Chicken',
+        'HOME FRY': 'Home Fry',
+        'Home FRY': 'Home Fry',
+        'FF': 'French Fries',
+        'Butte': 'Butter',
+    }
+
+    # Known garbage modifiers to remove
+    garbage = [
+        'Cornelius', 'U DigiCert TLS RSA SHA256 2020',
+        'Pint', 'Coors Light',
+    ]
+
     cleaned = []
+    seen = set()
     for mod in modifiers:
-        # Skip numeric-only modifiers
-        if isinstance(mod, str) and not re.match(r'^\d+$', mod):
-            # Skip items that look like they should be separate menu items
-            if mod not in ['Coors Light', 'Pint', 'U DigiCert TLS RSA SHA256 2020']:
-                cleaned.append(mod)
+        if not isinstance(mod, str):
+            continue
+        # Skip numeric-only
+        if re.match(r'^\d+$', mod):
+            continue
+        # Skip garbage
+        if mod in garbage:
+            continue
+        # Fix known abbreviations
+        mod = modifier_fixes.get(mod, mod)
+        # Skip duplicates
+        if mod in seen:
+            continue
+        seen.add(mod)
+        cleaned.append(mod)
+
     return cleaned
 
 def process_prediction(pred: Union[str, Dict]) -> Dict:
@@ -146,55 +192,55 @@ def process_prediction(pred: Union[str, Dict]) -> Dict:
     # Step 1: Fix JSON structure
     if isinstance(pred, str):
         pred = fix_malformed_json(pred)
-    
+
     if not isinstance(pred, dict):
         pred = {}
-    
+
     # Step 2: Process each field
     processed = {}
-    
+
     # Handle nulls consistently
-    for field in ['customer_name', 'date', 'time', 'check_number', 'table_number', 
+    for field in ['customer_name', 'date', 'time', 'check_number', 'table_number',
                   'pickup_time', 'total_amount', 'restaurant_name']:
         value = pred.get(field)
-        if value in ["N/A", "null", "None", ""]:
+        if value in ["N/A", "null", "None", "", "h"]:
             processed[field] = None if field != 'table_number' else ("" if value == "" else None)
         else:
             processed[field] = value
-    
+
     # Fix date format
     if processed.get('date'):
         processed['date'] = normalize_date(processed['date'])
-    
+
     # Handle confidence score
     processed['confidence_score'] = pred.get('confidence_score', 0.5)
-    
+
     # Process order items
     order_items = pred.get('order_items', [])
     if not isinstance(order_items, list):
         order_items = []
-    
+
     processed_items = []
     for item in order_items:
         if not isinstance(item, dict):
             continue
-        
+
         # Get item name and extract quantity
         item_name = item.get('item_name', '')
         quantity = item.get('quantity', 1)
-        
+
         # Extract quantity from name if present
         item_name, extracted_qty = extract_quantity(item_name, quantity)
         if extracted_qty != quantity and quantity == 1:
             quantity = extracted_qty
-        
+
         # Fix item name
         item_name = fix_item_names(item_name)
-        
+
         # Skip if no valid item name or if it's garbage
         if not item_name:
             continue
-        
+
         # Build cleaned item
         cleaned_item = {
             'item_name': item_name,
@@ -202,77 +248,52 @@ def process_prediction(pred: Union[str, Dict]) -> Dict:
             'modifiers': clean_modifiers(item.get('modifiers', [])),
             'price': item.get('price')
         }
-        
+
         # Add seat number if present
         seat = item.get('seat_number')
         if seat and seat not in ['None', 'null', 'N/A']:
             cleaned_item['seat_number'] = seat
-        
+
         processed_items.append(cleaned_item)
-    
-    processed['order_items'] = processed_items
-    
+
+    # Deduplicate order items
+    seen_items = set()
+    deduped_items = []
+    for item in processed_items:
+        key = (item['item_name'], item.get('seat_number'))
+        if key not in seen_items:
+            seen_items.add(key)
+            deduped_items.append(item)
+
+    processed['order_items'] = deduped_items
+
     return processed
 
 def main():
     """Main execution"""
-    try:
-        from main import load_and_test_model
-        
-        # Load model and get predictions
-        print("Loading model and getting predictions...")
-        model, tokenizer, preds, metrics = load_and_test_model('./best_receipt_parser', 'test.json')
-        
-        print(f"\nOriginal Metrics: {metrics}")
-        print("="*80)
-        
-        # Process all predictions
-        print("\nApplying minimal post-processing...")
-        processed_preds = []
-        
-        for i, pred in enumerate(preds):
-            try:
-                processed = process_prediction(pred)
-                processed_preds.append(processed)
-            except Exception as e:
-                print(f"Error processing prediction {i}: {e}")
-                processed_preds.append({
-                    "customer_name": None,
-                    "date": None,
-                    "time": None,
-                    "check_number": None,
-                    "table_number": None,
-                    "pickup_time": None,
-                    "total_amount": None,
-                    "restaurant_name": None,
-                    "confidence_score": 0.5,
-                    "order_items": []
-                })
-        
-        # Save processed predictions
-        with open('processed_predictions.json', 'w') as f:
-            json.dump(processed_preds, f, indent=2)
-        
-        print("Processed predictions saved to processed_predictions.json")
-        
-        # Calculate improvements
-        valid_json_count = sum(1 for p in processed_preds if p and 'order_items' in p)
-        print(f"\nProcessed Results:")
-        print(f"Valid JSON: {valid_json_count}/{len(processed_preds)} ({100*valid_json_count/len(processed_preds):.1f}%)")
-        
-        # Show a few examples
-        print("\n" + "="*80)
-        print("EXAMPLE TRANSFORMATIONS:")
-        print("="*80)
-        
-        for i in range(min(3, len(preds))):
-            print(f"\nExample {i+1}:")
-            print(f"Original: {str(preds[i])[:100]}...")
-            print(f"Processed: {json.dumps(processed_preds[i], indent=2)[:200]}...")
-            
-    except ImportError as e:
-        print(f"Error: Could not import required module - {e}")
-        print("Make sure main.py is in the same directory")
+    # Load existing predictions from file
+    print("Loading predictions from test_predictions.json...")
+    with open('test_predictions.json', 'r') as f:
+        raw_preds = json.load(f)
+
+    # Process all predictions
+    print("Applying post-processing...")
+    processed_preds = []
+
+    for i, entry in enumerate(raw_preds):
+        try:
+            processed = process_prediction(entry['predicted'])
+            processed['file_id'] = entry['file_id']
+            processed_preds.append(processed)
+        except Exception as e:
+            print(f"Error processing prediction {i}: {e}")
+
+    # Save processed predictions
+    with open('processed_predictions.json', 'w') as f:
+        json.dump(processed_preds, f, indent=2)
+
+    print(f"Done. Processed {len(processed_preds)} predictions.")
+    print("Saved to processed_predictions.json")
 
 if __name__ == "__main__":
     main()

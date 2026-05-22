@@ -551,12 +551,12 @@ def main():
     """
     # Initialize processor with Groq API - using 70b model for better complex parsing
     processor = GroqReceiptProcessor(
-        model_name="llama3-70b-8192",  # Better for complex parsing
+        model_name="llama-3.3-70b-versatile",  # Better for complex parsing
         # Alternative: "llama-3.1-8b-instant" (faster but less accurate for complex receipts)
     )
     
     # Process your receipt file
-    input_file = "tcp_data_mod1.txt"  # Your input file
+    input_file = "../preprocessing/tcp_data_mod2.txt"  # Your input file
     output_directory = "./receipt_training_data"
     
     print("🚀 Starting enhanced receipt processing with Groq API...")
