@@ -1,5 +1,6 @@
 import json
 import re
+from difflib import get_close_matches
 from typing import Dict, List, Any, Union
 
 def fix_malformed_json(pred_str: str) -> Dict:
@@ -72,10 +73,25 @@ def normalize_date(date_str: str) -> str:
     
     return date_str
 
+# All known correction targets — used for fuzzy matching fallback
+_CORRECTION_TARGETS = None
+_FUZZY_LOG: List[Dict] = []  # Tracks fuzzy matches made this run
+
+def _get_correction_targets(replacements: dict) -> List[str]:
+    """Build correction target list once and cache it"""
+    global _CORRECTION_TARGETS
+    if _CORRECTION_TARGETS is None:
+        _CORRECTION_TARGETS = list(replacements.keys())
+    return _CORRECTION_TARGETS
+
+
 def fix_item_names(item_name: str) -> str:
     """Fix common OCR errors in item names"""
     if not item_name:
         return None
+
+    # Remove newlines/carriage returns (printer line-break artifacts e.g. "Wi\nngs", "Ch\neck#:")
+    item_name = item_name.replace('\n', '').replace('\r', '')
 
     # Strip extra whitespace and join split words
     item_name = ' '.join(item_name.split())
@@ -88,6 +104,7 @@ def fix_item_names(item_name: str) -> str:
         'NO MUSTARD', 'Mustard', 'Cheese', 'ToGo', 'Small', 'Large',
         'Skinny Fry', 'Home Fry', 'Cole Slaw', 'Ranch', 'Blue',
         'Peppercorn', 'Chix', 'Philly', 'No Pink', 'Cajun',
+        # Note: 'Slicker' is a real Dino's wing flavor (BBQ + Hot + Garlic) — do NOT add it here
     ]
     if item_name in garbage:
         return None
@@ -104,7 +121,8 @@ def fix_item_names(item_name: str) -> str:
         'Dino Burger Sa': 'Dino Burger Sandwich',
         'Dino B urger San': 'Dino Burger Sandwich',
         'CHX': 'Chicken',
-        'DOWNGRD C': 'Downgrade',
+        'DOWNGRD C': 'Downgrade to Chippers',  # Chippers = fresh cut seasoned chips on menu
+        'DOWNGRD F': 'Downgrade to Fries',
         'MICH ULTRA': 'Michelob Ultra',
         'MICH ULTR': 'Michelob Ultra',
         'Miche Ultra': 'Michelob Ultra',
@@ -126,6 +144,60 @@ def fix_item_names(item_name: str) -> str:
         '1/2BuffChixSand': '1/2 Buffalo Chicken Sandwich',
         'Pot S kins': 'Potato Skins',
         'Pino Grigio': 'Pinot Grigio',
+        # Sandwiches (verified against menu)
+        'Philly Stk Sand': 'Philly Steak Sandwich',
+        'Philly Chx Sand': 'Philly Chicken Sandwich',
+        'Philly Stk': 'Philly Steak',
+        'Philly Chx': 'Philly Chicken',
+        'Ital Stal Sand': 'Italian Stallion Sandwich',
+        'Ital Panini': 'Italian Panini',
+        'Clara CBR': "Clara's Chicken Bacon Ranch",
+        'Mat Mtball': "Matteo's Meatball",
+        'Don Corl': 'Don Corleone',
+        'Gia Srira': "Gia's Sriracha Slaw Chicken & Swiss",
+        'Buf Chix Sand': 'Buffalo Chicken Sandwich',
+        'Chix Parm': 'Chicken Parmesan',
+        'Fr Dip': 'French Dip',
+        # Burgers (verified against menu)
+        'Veg Chip BLK': 'Vegetarian Chipotle Black Bean Burger',
+        'Stlhse Burger': 'Steakhouse Burger',
+        'Maria Dbl Chz': "Maria's Double Cheesy",
+        'Sal Srira': "Sal's Sriracha Slaw & Swiss",
+        'Pep Jk Mush': 'Pepper Jack Mushroom Burger',
+        'Buf Bacon': 'Buffalo Bacon Burger',
+        'Buf Bleu': 'Buffalo Bleu Burger',
+        'Buf Chix Burger': 'Buffalo Chicken Burger',
+        # Wings (verified against menu — all are real flavors)
+        'Sw & Hot': 'Sweet & Hot',
+        'Swt Hot': 'Sweet & Hot',
+        'G & B': 'Garlic & Butter',
+        'G & P': 'Garlic & Parmesan',
+        'Sup Lewis': 'Super Lewis',
+        # Appetizers (verified against menu)
+        'Bskt Home Fry': 'Basket of Home Fries',
+        'Bskt Skny Mny': 'Basket of Skinny Minny Fries',
+        'Bskt Chip': 'Basket of Chippers',
+        'Bskt HCB': 'Basket of Hot Cheese Balls',
+        'Bav Pret': 'Bavarian Pretzels & Beer Cheese Dip',
+        'Buf Chix Dip': 'Buffalo Chicken Dip',
+        'Spin Art Dip': 'Spinach & Artichoke Dip',
+        'Awe On Pet': 'Awesome Onion Petals',
+        # Salads (verified against menu)
+        'Chix Bac Ranch': 'Chicken Bacon Ranch Salad',
+        'Buf Chix Sal': 'Buffalo Chicken Salad',
+        'Spin Chix Sal': 'Spinach Chicken Salad',
+        'Chrb Chix Sal': 'Charbroiled Chicken Salad',
+        'Chrb Stk Sal': 'Charbroiled Steak Salad',
+        # Platters (verified against menu)
+        'Cajun Bkd Chx': 'Cajun Baked Chicken',
+        'Ter Grll Chx': 'Teriyaki Grilled Chicken',
+        'Buf Mac Chz': 'Buffalo Mac & Cheese',
+        'Bac Mac Chz': 'Bacon Mac & Cheese',
+        # Ribs (verified against menu)
+        '1/2 Rack Plt': '1/2 Rack Platter',
+        'Full Rack Plt': 'Full Rack Platter',
+        'Rib Shrmp Plt': 'Rib & Shrimp Platter',
+        '1/2 Rack Wi': '1/2 Rack & Wings',
     }
 
     for old, new in replacements.items():
@@ -135,6 +207,24 @@ def fix_item_names(item_name: str) -> str:
     # Remove items that are just a single word under 3 characters
     if len(item_name) < 3:
         return None
+
+    # Fuzzy match fallback — catch near-misses not in the exact replacements list
+    # e.g. "Ital Stal San" → matches "Ital Stal Sandw" → "Italian Stallion Sandwich"
+
+    # At the start of the fuzzy match block, before get_close_matches:
+    if item_name in replacements.values():
+        return item_name
+    
+    candidates = _get_correction_targets(replacements)
+    close = get_close_matches(item_name, candidates, n=1, cutoff=0.82)
+    if close:
+        corrected = replacements[close[0]]
+        _FUZZY_LOG.append({
+            'original': item_name,
+            'matched_key': close[0],
+            'corrected_to': corrected
+        })
+        return corrected
 
     return item_name
 
@@ -294,6 +384,24 @@ def main():
 
     print(f"Done. Processed {len(processed_preds)} predictions.")
     print("Saved to processed_predictions.json")
+
+    # --- Summary stats ---
+    total_items = sum(len(p.get('order_items', [])) for p in processed_preds)
+    missing_dates = sum(1 for p in processed_preds if not p.get('date'))
+    missing_totals = sum(1 for p in processed_preds if not p.get('total_amount'))
+
+    print(f"\n--- Post-Processing Summary ---")
+    print(f"  Receipts processed : {len(processed_preds)}")
+    print(f"  Total order items  : {total_items}")
+    print(f"  Missing dates      : {missing_dates}/{len(processed_preds)}")
+    print(f"  Missing totals     : {missing_totals}/{len(processed_preds)}")
+
+    if _FUZZY_LOG:
+        print(f"\n--- Fuzzy Match Corrections ({len(_FUZZY_LOG)} made) ---")
+        for entry in _FUZZY_LOG:
+            print(f"  '{entry['original']}' → matched '{entry['matched_key']}' → '{entry['corrected_to']}'")
+    else:
+        print("\n  No fuzzy matches triggered this run.")
 
 if __name__ == "__main__":
     main()
