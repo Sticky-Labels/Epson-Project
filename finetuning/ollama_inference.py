@@ -9,6 +9,17 @@ Reads test.json (or any training split), runs each receipt through
 the local Llama model, validates the JSON output against the receipt
 schema, and prints a full quality report.
 
+UPDATES:
+  - Ollama `format` parameter now passes RECEIPT_SCHEMA directly,
+    constraining token-level decoding so output is guaranteed to be
+    syntactically valid JSON matching the schema.
+  - clean_receipt_text() pre-processes raw receipt text before it
+    hits the model, fixing three common ESC/POS corruption patterns:
+      1. ï¿½ garbage (mangled UTF-8 replacement chars)
+      2. Stray 'r' carriage-return control bytes at line starts
+      3. Mid-word line breaks (e.g. "Miche\\nlob" → "Michelob")
+    This recovers receipts that previously returned empty order_items.
+
 Usage:
     python ollama_inference.py                        # runs on test.json
     python ollama_inference.py --split train          # runs on train.json
@@ -41,6 +52,10 @@ DEFAULT_SPLIT = "test"
 
 # ---------------------------------------------------------------------------
 # JSON Schema (matches tts_gen.py / testing.py)
+#
+# Passed directly to Ollama's `format` parameter to constrain generation
+# at the token level — output is guaranteed to be syntactically valid JSON
+# matching this shape (types + required fields enforced during decoding).
 # ---------------------------------------------------------------------------
 
 RECEIPT_SCHEMA = {
@@ -126,6 +141,49 @@ def build_prompt(receipt_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Receipt text pre-processor
+#
+# Cleans raw ESC/POS receipt text before sending to the model.
+# Fixes three corruption patterns seen in the wild:
+#
+#   1. ï¿½ sequences — mangled UTF-8 replacement characters from binary
+#      ESC/POS control bytes bleeding into the text stream
+#
+#   2. Stray 'r' lines / leading 'r' clusters — carriage-return (0x0D)
+#      control bytes that were decoded as the letter 'r' instead of
+#      being stripped, e.g.:
+#        "r  !1     Ameri\ncan" → "!1     American"
+#
+#   3. Mid-word line breaks — the thermal printer wraps at a fixed
+#      column width, splitting item names across lines, e.g.:
+#        "Miche\nlob Ultra" → "Michelob Ultra"
+#        "!!T\nable: 5"     → "!!Table: 5"
+#        "RELI\nSH"         → "RELISH"
+#      The lookbehind (?<![ap]m) prevents time fields like
+#      "11:21am\neck#:..." from being incorrectly joined.
+# ---------------------------------------------------------------------------
+
+def clean_receipt_text(text: str) -> str:
+    # 1. Strip ï¿½ garbage
+    text = re.sub(r'ï¿½+', '', text)
+
+    # 2. Strip stray 'r' ESC/POS artifacts
+    text = re.sub(r'(?m)^\s*r\s*$', '', text)       # lone 'r' on its own line
+    text = re.sub(r'(?m)^\s*(?:r\s+)+', '', text)   # 'r  ' clusters at line start
+
+    # 3. Join mid-word line breaks
+    #    Pass 1: letter → lowercase  (most item names, table labels)
+    text = re.sub(r'([a-zA-Z])(?<![ap]m)\n([a-z])', r'\1\2', text)
+    #    Pass 2: uppercase → uppercase  (ALL-CAPS items e.g. RELISH, JONATHAN)
+    text = re.sub(r'([A-Z])(?<![AP]M)\n([A-Z])', r'\1\2', text)
+
+    # 4. Collapse 3+ blank lines to 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
 # Ollama client
 # ---------------------------------------------------------------------------
 
@@ -138,17 +196,23 @@ def check_ollama_running() -> bool:
 
 
 def call_ollama(prompt: str, retries: int = 3) -> Optional[str]:
-    """Call Ollama API and return raw text response."""
+    """Call Ollama API and return raw text response.
+
+    Uses the `format` parameter with RECEIPT_SCHEMA to constrain decoding
+    so the model can only emit tokens that keep the output valid JSON
+    matching the schema (structured outputs, not just JSON-mode).
+    """
     payload = {
         "model":  OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        "format": RECEIPT_SCHEMA,   # constrained / structured output
         "options": {
             "temperature": 0.1,
             "top_p": 0.9,
             "repeat_penalty": 1.1,
-            "num_predict": 2048,   # enough for full JSON with many order items
-            "num_ctx": 4096,       # context window
+            "num_predict": 2048,
+            "num_ctx": 4096,
         },
     }
 
@@ -169,6 +233,9 @@ def call_ollama(prompt: str, retries: int = 3) -> Optional[str]:
 
 # ---------------------------------------------------------------------------
 # JSON extraction and validation
+#
+# Kept as a safety net. With `format` constraining decoding these mostly
+# act as a fallback for any rare malformed response.
 # ---------------------------------------------------------------------------
 
 def extract_json(raw: str) -> Optional[str]:
@@ -176,14 +243,12 @@ def extract_json(raw: str) -> Optional[str]:
     if not raw:
         return None
 
-    # Try direct parse first
     try:
         json.loads(raw)
         return raw
     except Exception:
         pass
 
-    # Find first { ... } block
     start = raw.find('{')
     if start == -1:
         return None
@@ -211,7 +276,6 @@ def validate_schema(parsed: Dict) -> Tuple[bool, str]:
         jsonschema.validate(instance=parsed, schema=RECEIPT_SCHEMA)
         return True, "ok"
     except ImportError:
-        # jsonschema not installed — do basic checks manually
         required = ["customer_name", "date", "time", "check_number",
                     "table_number", "pickup_time", "total_amount",
                     "restaurant_name", "confidence_score", "order_items"]
@@ -236,15 +300,14 @@ def score_receipt(parsed: Dict, expected: Optional[Dict] = None) -> Dict:
         ) if parsed.get("order_items") else False,
     }
 
-    # Field match against expected if provided
     if expected:
         try:
             exp = json.loads(expected) if isinstance(expected, str) else expected
-            scores["date_match"]         = parsed.get("date")          == exp.get("date")
-            scores["check_match"]        = parsed.get("check_number")  == exp.get("check_number")
-            scores["customer_match"]     = parsed.get("customer_name") == exp.get("customer_name")
-            scores["table_match"]        = parsed.get("table_number")  == exp.get("table_number")
-            scores["item_count_match"]   = (
+            scores["date_match"]       = parsed.get("date")          == exp.get("date")
+            scores["check_match"]      = parsed.get("check_number")  == exp.get("check_number")
+            scores["customer_match"]   = parsed.get("customer_name") == exp.get("customer_name")
+            scores["table_match"]      = parsed.get("table_number")  == exp.get("table_number")
+            scores["item_count_match"] = (
                 len(parsed.get("order_items") or []) ==
                 len(exp.get("order_items") or [])
             )
@@ -260,7 +323,8 @@ def score_receipt(parsed: Dict, expected: Optional[Dict] = None) -> Dict:
 
 def parse_receipt(receipt_text: str, verbose: bool = True) -> Dict:
     """Parse a single receipt text string → structured dict."""
-    prompt   = build_prompt(receipt_text)
+    cleaned  = clean_receipt_text(receipt_text)
+    prompt   = build_prompt(cleaned)
     raw      = call_ollama(prompt)
     json_str = extract_json(raw) if raw else None
 
@@ -278,7 +342,6 @@ def parse_receipt(receipt_text: str, verbose: bool = True) -> Dict:
             print(f"   ❌ JSON parse error: {e}")
         return {}
 
-    # Ensure order_items is always a list
     if parsed.get("order_items") is None:
         parsed["order_items"] = []
 
@@ -299,13 +362,11 @@ def run_on_split(
     print(f"Model: {OLLAMA_MODEL}  |  File: {filepath}")
     print(f"{'='*60}")
 
-    # Check Ollama is running
     if not check_ollama_running():
         print("❌ Ollama is not running. Start it with: ollama serve")
         sys.exit(1)
     print("✅ Ollama is running\n")
 
-    # Load data
     try:
         with open(filepath) as f:
             raw_data = json.load(f)
@@ -319,19 +380,17 @@ def run_on_split(
 
     print(f"Receipts to process: {len(data)}\n")
 
-    results      = []
-    valid_json   = 0
-    schema_ok    = 0
-    has_items    = 0
-    date_correct = 0
+    results       = []
+    valid_json    = 0
+    schema_ok     = 0
+    has_items     = 0
+    date_correct  = 0
     check_correct = 0
 
     for i, entry in enumerate(data, 1):
         inp    = entry.get("input", "")
         target = entry.get("target", None)
 
-        # Extract just the receipt text — strip the embedded system prompt
-        # that tts_gen.py bakes into the input field (it's verbose and eats context)
         if "RECEIPT TEXT:" in inp:
             receipt_text = inp.split("RECEIPT TEXT:")[1].split("EXTRACTION RULES:")[0].strip()
         elif "Receipt Text:" in inp:
@@ -353,7 +412,6 @@ def run_on_split(
 
         valid_json += 1
 
-        # Schema validation
         ok, err = validate_schema(parsed)
         if ok:
             schema_ok += 1
@@ -361,7 +419,6 @@ def run_on_split(
         else:
             schema_status = f"⚠️  schema: {err[:60]}"
 
-        # Scores
         scores = score_receipt(parsed, target)
         if scores.get("has_order_items"):
             has_items += 1
@@ -388,9 +445,7 @@ def run_on_split(
         result["_file_id"] = entry.get("file_id", i)
         results.append(result)
 
-    # ---------------------------------------------------------------------------
     # Summary
-    # ---------------------------------------------------------------------------
     total = len(data)
     print(f"\n{'='*60}")
     print("RESULTS SUMMARY")
@@ -411,7 +466,6 @@ def run_on_split(
     print(f"  Overall grade: {grade}  ({pct:.1f}% valid JSON)")
     print(f"{'='*60}\n")
 
-    # Save output
     if output_file:
         with open(output_file, "w") as f:
             json.dump(results, f, indent=2)
@@ -441,7 +495,6 @@ def main():
     args = parser.parse_args()
 
     if args.receipt:
-        # Single receipt mode
         if not check_ollama_running():
             print("❌ Ollama is not running. Start it with: ollama serve")
             sys.exit(1)
