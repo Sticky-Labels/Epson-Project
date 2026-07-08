@@ -130,10 +130,23 @@ def get_customer_name(receipt):
         return f"Table: {table}"
     return customer or None
 
+def fix_fraction_item(item):
+    modifiers = list(item.get("modifiers") or [])
+    item_name = item.get("item_name") or ""
+    if modifiers and re.match(r'^\d+/\d+$', str(modifiers[0]).strip()):
+        fraction  = modifiers.pop(0)
+        item_name = f"{fraction} {item_name}"
+        item = dict(item)
+        item["item_name"] = item_name
+        item["modifiers"] = modifiers
+    return item
+
 def get_order_items(receipt):
     items = receipt.get("order_items") or []
-    return [i for i in items
-            if i.get("item_name") and not i["item_name"].startswith("!")]
+    return [
+        fix_fraction_item(i) for i in items
+        if i.get("item_name") and not i["item_name"].startswith("!")
+    ]
 
 def filter_modifiers(modifiers):
     return [m for m in (modifiers or []) if m and not str(m).startswith("!")]
