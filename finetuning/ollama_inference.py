@@ -128,14 +128,19 @@ Rules:
 - order_items MUST be a list, never null — use [] if no items found
 - quantity MUST be an integer (e.g. 1, 2, 3) — never a string
 - item_name must NOT include the leading quantity number — e.g. "1 Wings Large" → item_name="Wings Large", quantity=1
+- IMPORTANT: fractional items like "1  1/2Rack&Wings" mean quantity=1, item_name="1/2 Rack&Wings" — the "1/2" is PART of the item name, not the quantity. Always preserve "1/2" in the item name with a space after it.
+- Example: "1  1/2Rack&Wings" → quantity=1, item_name="1/2 Rack&Wings"
+- Example: "1  Wings Large" → quantity=1, item_name="Wings Large"
 - Each indented line under an item is a modifier, not a separate item
-- Lines starting with a number (e.g. "1 Wings Large") are items with quantity — strip the number from item_name
-- Seat dividers like [Seat 1] group items by seat
+- An order item MUST have an explicit quantity number at the start of its line on the receipt (e.g. "1 Wings Large", "2 Diet Coke"). If a line has no leading number it is a modifier/condiment of the item above it, NOT a separate item.
+- Lines like "Lewis", "Blue Cheese", "All Drums", "Double Time" have no leading number — they are ALWAYS modifiers, never items.
+- Seat dividers like [Seat 1] or "--[Seat 1]--" group items by seat — use seat_number for these
+- seat_number should ONLY be set if there is an explicit [Seat N] divider line. Names like "Lewis", "Blue Cheese" etc are modifiers, NOT seat numbers — set seat_number to null for these
 - total_amount is ALWAYS null (not printed on kitchen tickets) — always include it
 - modifiers MUST be a list of strings — never null, use [] if none
 - price is ALWAYS null unless explicitly shown
-- table_number: extract ONLY the actual table value (e.g. "5", "P 2", "W-8") — do NOT include the word "Table:" in the value. If the receipt shows "Table:" with nothing after it, set table_number to null
-- pickup_time: look for a line starting with ! that contains a time (e.g. "!1120" → "11:20", "!11:20am" → "11:20am", "Pick up Time12:00pm" → "12:00pm"). Format as H:MMam/pm on a 12-hour clock. This is the LAST ! line in the order.
+- table_number: extract ONLY the actual table value (e.g. "5", "P 2", "W-8") — do NOT include the word "Table:" in the value. If the receipt shows "Table:" with nothing after it on the same line, set table_number to null. Only set table_number if there is an actual value present after "Table:" on the receipt.
+- pickup_time: look for a line starting with ! that contains a time (e.g. "!1120" → "11:20am", "!11:20am" → "11:20am", "Pick up Time12:00pm" → "12:00pm"). Format as H:MMam/pm on a 12-hour clock. This is the LAST ! line in the order.
 - customer_name: look for the SECOND TO LAST line starting with ! in the order (e.g. "!DINO" → "DINO", "!Alice" → "Alice"). Strip the leading !
 - Return ONLY the JSON object, nothing else"""
 
@@ -183,6 +188,10 @@ def clean_receipt_text(text: str) -> str:
 
     # 4. Collapse 3+ blank lines to 2
     text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 5. Insert space after fractions immediately followed by a letter
+    #    e.g. "1/2Rack&Wings" → "1/2 Rack&Wings"
+    text = re.sub(r'(\d/\d)([A-Za-z])', r'\1 \2', text)
 
     return text.strip()
 
@@ -348,6 +357,11 @@ def parse_receipt(receipt_text: str, verbose: bool = True) -> Dict:
 
     if parsed.get("order_items") is None:
         parsed["order_items"] = []
+
+    # Override table_number if the raw receipt shows "Table:" with nothing after it
+    # The model sometimes hallucinates a value when there is none
+    if re.search(r'(?m)^Table:\s*$', receipt_text):
+        parsed["table_number"] = None
 
     return parsed
 
