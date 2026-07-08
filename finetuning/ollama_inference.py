@@ -127,12 +127,16 @@ JSON schema (all fields required, use null if not present):
 Rules:
 - order_items MUST be a list, never null — use [] if no items found
 - quantity MUST be an integer (e.g. 1, 2, 3) — never a string
+- item_name must NOT include the leading quantity number — e.g. "1 Wings Large" → item_name="Wings Large", quantity=1
 - Each indented line under an item is a modifier, not a separate item
-- Lines starting with a number (e.g. "1 Wings Large") are items with quantity
+- Lines starting with a number (e.g. "1 Wings Large") are items with quantity — strip the number from item_name
 - Seat dividers like [Seat 1] group items by seat
 - total_amount is ALWAYS null (not printed on kitchen tickets) — always include it
 - modifiers MUST be a list of strings — never null, use [] if none
 - price is ALWAYS null unless explicitly shown
+- table_number: extract ONLY the actual table value (e.g. "5", "P 2", "W-8") — do NOT include the word "Table:" in the value. If the receipt shows "Table:" with nothing after it, set table_number to null
+- pickup_time: look for a line starting with ! that contains a time (e.g. "!1120" → "11:20", "!11:20am" → "11:20am", "Pick up Time12:00pm" → "12:00pm"). Format as H:MMam/pm on a 12-hour clock. This is the LAST ! line in the order.
+- customer_name: look for the SECOND TO LAST line starting with ! in the order (e.g. "!DINO" → "DINO", "!Alice" → "Alice"). Strip the leading !
 - Return ONLY the JSON object, nothing else"""
 
 
