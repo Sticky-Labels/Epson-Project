@@ -121,13 +121,29 @@ def clean_table_number(table: Optional[str]) -> str:
 def clean_item_name(item_name: str) -> str:
     """Strip leading whole-number quantity if the model accidentally included it.
     e.g. '1 Wings Large' → 'Wings Large'
-    but '1/2 Rack&Wings' → '1/2 Rack&Wings' (fraction, not a quantity)
+    but '1/2 Rack&Wings' → '1/2 Rack&Wings' (fraction is part of name)
     """
     if not item_name:
         return ""
     import re
-    # Only strip if it's a plain integer followed by a space, not a fraction (1/2, 3/4 etc)
     return re.sub(r'^\d+(?!/)\s+', '', item_name.strip())
+
+def fix_fraction_item(item: dict) -> dict:
+    """If the model put '1/2' (or similar fraction) as the first modifier
+    instead of prepending it to the item name, move it back.
+    e.g. item_name='Rack&Wings', modifiers=['1/2', 'Lewis', ...]
+      -> item_name='1/2 Rack&Wings', modifiers=['Lewis', ...]
+    """
+    import re
+    modifiers = list(item.get("modifiers") or [])
+    item_name = item.get("item_name") or ""
+    if modifiers and re.match(r'^\d+/\d+$', str(modifiers[0]).strip()):
+        fraction  = modifiers.pop(0)
+        item_name = f"{fraction} {item_name}"
+        item = dict(item)
+        item["item_name"]  = item_name
+        item["modifiers"]  = modifiers
+    return item
 
 def get_customer_name(receipt: dict) -> Optional[str]:
     """
@@ -145,12 +161,13 @@ def get_pickup_time(receipt: dict) -> Optional[str]:
     return receipt.get("pickup_time") or None
 
 def get_order_items(receipt: dict) -> list:
-    """Return real order items — filter out ! marker lines."""
+    """Return real order items — filter out ! marker lines, fix fraction names."""
     items = receipt.get("order_items") or []
-    return [
-        item for item in items
+    cleaned = [
+        fix_fraction_item(item) for item in items
         if item.get("item_name") and not item["item_name"].startswith("!")
     ]
+    return cleaned
 
 def filter_modifiers(modifiers: list) -> list:
     """Filter out ! marker lines from modifiers (customer name / pickup time markers)."""
