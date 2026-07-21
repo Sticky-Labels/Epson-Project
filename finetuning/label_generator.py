@@ -69,17 +69,46 @@ def separator(char: str = "-") -> bytes:
     return encode(char * PAPER_WIDTH_CHARS) + LF
 
 def checkbox_line(qty: int, item_name: str) -> bytes:
-    """☐  1  ItemName — checkbox + quantity + name, bold double size."""
-    text = f"  {qty}  {truncate(item_name, PAPER_WIDTH_CHARS - 5)}"
-    return (
-        FONT_DOUBLE +
-        BOLD_ON +
-        b'\xfe' +
-        encode(text) +
-        LF +
-        BOLD_OFF +
-        FONT_NORMAL
-    )
+    """☐  [qty]  ItemName
+    qty == 1: item name at full double size (2x width + height).
+    qty  > 1: quantity prefix + item name, same font/bold, sized to fit on
+              one line:
+              - double-height (bigger) if prefix + name fits in 32 chars
+              - normal size (fallback) if it doesn't, so nothing is ever cut off
+    """
+    buf = bytearray()
+    buf += b'\x9a'   # open square outline checkbox
+
+    if qty > 1:
+        prefix = f" {qty} "
+        line_len = len(prefix) + len(item_name)
+
+        if line_len <= PAPER_WIDTH_CHARS:
+            # Fits at the bigger size — double-height keeps 32-char width
+            # (only double-WIDTH would shrink to 16 chars, so avoid that here)
+            line_font = FONT_DOUBLE_H
+        else:
+            # Too long even at 32 chars — drop to normal size rather than truncate
+            line_font = FONT_NORMAL
+
+        # Prefix and item name now share the same font size AND both are bold
+        buf += line_font
+        buf += BOLD_ON
+        buf += encode(prefix)
+        buf += encode(item_name)   # never truncated
+        buf += LF
+        buf += BOLD_OFF
+        buf += FONT_NORMAL
+    else:
+        buf += encode("  ")
+        buf += FONT_DOUBLE
+        buf += BOLD_ON
+        buf += encode(truncate(item_name, PAPER_WIDTH_CHARS - 5))
+        buf += LF
+        buf += BOLD_OFF
+        buf += FONT_NORMAL
+
+    return bytes(buf)
 
 def condiment_line(text: str, indent: int = 4) -> bytes:
     indented = " " * indent + truncate(text, PAPER_WIDTH_CHARS - indent)
@@ -211,12 +240,12 @@ def build_checklist(receipt: dict) -> bytes:
     buf += encode("SPORTS LOUNGE") + LF
     buf += BOLD_OFF
 
-    # --- "DINO" in reverse text bar (only DINO, not SPORTS LOUNGE) ---
+    # --- "DINO" in reverse text bar ---
+    customer   = get_customer_name(receipt)
     buf += REVERSE_ON
     buf += BOLD_ON
     buf += FONT_DOUBLE
-    dino_line = "DINO".center(PAPER_WIDTH_CHARS)
-    buf += encode(dino_line) + LF
+    buf += encode(customer.center(16)) + LF   # 16 chars at double-width = full 58mm
     buf += FONT_NORMAL
     buf += BOLD_OFF
     buf += REVERSE_OFF
@@ -229,20 +258,25 @@ def build_checklist(receipt: dict) -> bytes:
     check_num = receipt.get("check_number") or ""
     table     = receipt.get("table_number") or ""
 
-    # Date left, "Pick Up Time" right-aligned on same line
+    # Date left, "Pick Up Time" right-aligned on same line (bold)
     pickup_label = "Pick Up Time"
     pad = PAPER_WIDTH_CHARS - len(date) - len(pickup_label)
-    buf += encode(date + " " * max(1, pad) + pickup_label) + LF
+    buf += encode(date)
+    buf += BOLD_ON
+    buf += encode(" " * max(1, pad) + pickup_label) + LF
+    buf += BOLD_OFF
 
-    # Check number left, actual pickup time right-aligned
+    # Check number left, actual pickup time right-aligned (bold)
     pickup_val = pickup if pickup else ""
     pad2 = PAPER_WIDTH_CHARS - len(f"# {check_num}") - len(pickup_val)
+    buf += BOLD_ON
     buf += encode(f"# {check_num}" + " " * max(1, pad2) + pickup_val) + LF
+    buf += BOLD_OFF
 
     buf += encode(f"Table: {clean_table_number(table)}") + LF
     buf += separator("-")
 
-    # --- Order items with checkboxes (NO customer name reverse bar on checklist) ---
+    # --- Order items with checkboxes ---
     items = get_order_items(receipt)
     for item in items:
         qty       = item.get("quantity") or 1
@@ -256,10 +290,6 @@ def build_checklist(receipt: dict) -> bytes:
     buf += separator("=")
 
     # --- Footer ---
-    buf += LF
-    buf += encode("Bag") + encode(" " * 12) + encode("Of") + encode(" " * 8) + LF
-    buf += LF
-    buf += encode("Packed By ") + encode("_" * 22) + LF
     buf += LF
     buf += ALIGN_CENTER
     buf += encode(RESTAURANT_ADDRESS) + LF
@@ -297,14 +327,6 @@ def build_item_label(receipt: dict, item: dict, sequence: int, total_items: int)
     """
     buf = bytearray()
     buf += INIT
-    buf += ALIGN_CENTER
-    buf += BOLD_ON
-    buf += FONT_DOUBLE
-    buf += encode("DINO") + LF
-    buf += FONT_NORMAL
-    buf += BOLD_OFF
-    buf += LF
-
     buf += ALIGN_LEFT
     check_num  = receipt.get("check_number") or ""
     pickup     = get_pickup_time(receipt)
@@ -312,6 +334,18 @@ def build_item_label(receipt: dict, item: dict, sequence: int, total_items: int)
     item_name  = clean_item_name(item.get("item_name") or "")
     modifiers  = filter_modifiers(item.get("modifiers") or [])
 
+    # --- Customer name at top (large bold) ---
+    if customer:
+        buf += ALIGN_CENTER
+        buf += BOLD_ON
+        buf += FONT_DOUBLE
+        buf += encode(truncate(customer.upper(), PAPER_WIDTH_CHARS)) + LF
+        buf += FONT_NORMAL
+        buf += BOLD_OFF
+        buf += LF
+        buf += ALIGN_LEFT
+
+    # --- Order number + sequence ---
     seq_str    = f"{sequence} of {total_items}"
     order_line = f"Order {check_num}"
     pad        = PAPER_WIDTH_CHARS - len(order_line) - len(seq_str)
@@ -319,19 +353,12 @@ def build_item_label(receipt: dict, item: dict, sequence: int, total_items: int)
 
     pickup_str = f"Pick Up Time {pickup}" if pickup else "Pick Up Time"
     buf += encode(truncate(pickup_str)) + LF
-    buf += separator("-")
 
-    if customer:
-        buf += BOLD_ON
-        buf += FONT_DOUBLE_H
-        buf += encode(truncate(customer.upper())) + LF
-        buf += FONT_NORMAL
-        buf += BOLD_OFF
-
-    buf += separator("-")
+    # --- Item name (large bold, no separators) ---
+    buf += LF
     buf += BOLD_ON
     buf += FONT_DOUBLE
-    buf += encode(truncate(item_name)) + LF
+    buf += encode(truncate(item_name, PAPER_WIDTH_CHARS)) + LF
     buf += FONT_NORMAL
     buf += BOLD_OFF
 
