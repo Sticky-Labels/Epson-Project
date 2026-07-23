@@ -30,6 +30,8 @@ from typing import Optional
 ESC = b'\x1b'
 GS  = b'\x1d'
 
+FONT_B          = ESC + b'M\x01'
+FONT_A          = ESC + b'M\x00'
 INIT            = ESC + b'@'
 BOLD_ON         = ESC + b'E\x01'
 BOLD_OFF        = ESC + b'E\x00'
@@ -68,6 +70,35 @@ def truncate(text: str, max_chars: int = PAPER_WIDTH_CHARS) -> str:
 def separator(char: str = "-") -> bytes:
     return encode(char * PAPER_WIDTH_CHARS) + LF
 
+def checkbox_bitmap(size: int = 24, border: int = 3) -> bytes:
+    """
+    Draws a hollow square outline as an inline ESC/POS bit image
+    (ESC * mode 33 = 24-dot double-density), so it sits on the same
+    line as following text instead of forcing a line break.
+
+    size:   width/height in dots (24 looks right at normal font size)
+    border: thickness of the outline in dots
+    """
+    m = 33  # 24-dot, double density
+    data = bytearray()
+
+    for col in range(size):
+        is_border_col = col < border or col >= size - border
+        col_bits = [0] * 24
+        for row in range(24):
+            if is_border_col or row < border or row >= 24 - border:
+                col_bits[row] = 1
+        for byte_i in range(3):
+            byte = 0
+            for bit in range(8):
+                if col_bits[byte_i * 8 + bit]:
+                    byte |= (1 << (7 - bit))
+            data.append(byte)
+
+    nL = size & 0xFF
+    nH = (size >> 8) & 0xFF
+    return ESC + b'*' + bytes([m, nL, nH]) + bytes(data)
+
 def checkbox_line(qty: int, item_name: str) -> bytes:
     """☐  [qty]  ItemName
     qty == 1: item name at full double size (2x width + height).
@@ -77,7 +108,8 @@ def checkbox_line(qty: int, item_name: str) -> bytes:
               - normal size (fallback) if it doesn't, so nothing is ever cut off
     """
     buf = bytearray()
-    buf += b'\x9a'   # open square outline checkbox
+    buf += checkbox_bitmap(24) 
+    buf += encode(" ")
 
     if qty > 1:
         prefix = f" {qty} "
@@ -101,12 +133,14 @@ def checkbox_line(qty: int, item_name: str) -> bytes:
         buf += FONT_NORMAL
     else:
         buf += encode("  ")
+        buf += FONT_B
         buf += FONT_DOUBLE
         buf += BOLD_ON
         buf += encode(truncate(item_name, PAPER_WIDTH_CHARS - 5))
         buf += LF
         buf += BOLD_OFF
         buf += FONT_NORMAL
+        buf += FONT_A
 
     return bytes(buf)
 
@@ -286,6 +320,8 @@ def build_checklist(receipt: dict) -> bytes:
         buf += checkbox_line(qty, item_name)
         for mod in modifiers:
             buf += condiment_line(str(mod))
+
+        buf += LF
 
     buf += separator("=")
 
